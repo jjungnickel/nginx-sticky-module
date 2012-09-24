@@ -26,6 +26,7 @@ typedef struct {
 	ngx_str_t                     hmac_key;
 	ngx_http_sticky_misc_hash_pt  hash;
 	ngx_http_sticky_misc_hmac_pt  hmac;
+	ngx_http_sticky_misc_text_pt  text;
 	ngx_uint_t                    no_fallback;
 	ngx_http_sticky_peer_t       *peers;
 } ngx_http_sticky_srv_conf_t;
@@ -122,7 +123,7 @@ ngx_int_t ngx_http_init_upstream_sticky(ngx_conf_t *cf, ngx_http_upstream_srv_co
 	conf = ngx_http_conf_upstream_srv_conf(us, ngx_http_sticky_module);
 
 	/* if 'index', no need to alloc and generate digest */
-	if (!conf->hash && !conf->hmac) {
+	if (!conf->hash && !conf->hmac && !conf->text) {
 		conf->peers = NULL;
 		return NGX_OK;
 	}
@@ -140,6 +141,10 @@ ngx_int_t ngx_http_init_upstream_sticky(ngx_conf_t *cf, ngx_http_upstream_srv_co
 		if (conf->hmac) {
 			/* generate hmac */
 			conf->hmac(cf->pool, rr_peers->peer[i].sockaddr, rr_peers->peer[i].socklen, &conf->hmac_key, &conf->peers[i].digest);
+
+		} else if (conf->text) {
+			/* generate text */
+			conf->text(cf->pool, rr_peers->peer[i].sockaddr, &conf->peers[i].digest);
 
 		} else {
 			/* generate hash */
@@ -196,8 +201,8 @@ static ngx_int_t ngx_http_init_sticky_peer(ngx_http_request_t *r, ngx_http_upstr
 		/* a route cookie has been found. Let's give it a try */
 		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "[sticky/init_sticky_peer] got cookie route=%V, let's try to find a matching peer", &route);
 
-		/* hash or hmac, just compare digest */
-		if (iphp->sticky_conf->hash || iphp->sticky_conf->hmac) {
+		/* hash, hmac or text, just compare digest */
+		if (iphp->sticky_conf->hash || iphp->sticky_conf->hmac || iphp->sticky_conf->text) {
 
 			/* check internal struct has been set */
 			if (!iphp->sticky_conf->peers) {
@@ -352,7 +357,7 @@ static ngx_int_t ngx_http_get_sticky_peer(ngx_peer_connection_t *pc, void *data)
 		for (i = 0; i < iphp->rrp.peers->number; i++) {
 
 			if (iphp->rrp.peers->peer[i].sockaddr == pc->sockaddr && iphp->rrp.peers->peer[i].socklen == pc->socklen) {
-				if (conf->hash || conf->hmac) {
+				if (conf->hash || conf->hmac || conf->text) {
 					ngx_http_sticky_misc_set_cookie(iphp->request, &conf->cookie_name, &conf->peers[i].digest, &conf->cookie_domain, &conf->cookie_path, conf->cookie_expires);
 					ngx_log_debug(NGX_LOG_DEBUG_HTTP, pc->log, 0, "[sticky/get_sticky_peer] set cookie \"%V\" value=\"%V\" index=%ui", &conf->cookie_name, &conf->peers[i].digest, i);
 				} else {
@@ -398,6 +403,7 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	time_t expires = NGX_CONF_UNSET;
 	ngx_http_sticky_misc_hash_pt hash = NGX_CONF_UNSET_PTR;
 	ngx_http_sticky_misc_hmac_pt hmac = NULL;
+	ngx_http_sticky_misc_text_pt text = NULL;
 	ngx_uint_t no_fallback = 0;
 
 	/* parse all elements */
@@ -471,12 +477,53 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 			continue;
 		}
 
+		/* is "text=" is starting the argument ? */
+		if ((u_char *)ngx_strstr(value[i].data, "text=") == value[i].data) {
+
+			/* only hash or hmac can be used, not both */
+			if (hmac || hash != NGX_CONF_UNSET_PTR) {
+				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "please choose between \"hash=\", \"hmac=\" and \"text\"");
+				return NGX_CONF_ERROR;
+			}
+
+			/* do we have at least on char after "name=" ? */
+			if (value[i].len <= sizeof("text=") - 1) {
+				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "a value must be provided to \"text=\"");
+				return NGX_CONF_ERROR;
+			}
+
+			/* extract value to temp */
+			tmp.len =  value[i].len - ngx_strlen("text=");
+			tmp.data = (u_char *)(value[i].data + sizeof("text=") - 1);
+
+			/* is name=raw */
+			if (ngx_strncmp(tmp.data, "raw", sizeof("raw") - 1) == 0 ) {
+				text = ngx_http_sticky_misc_text_raw;
+				continue;
+			}
+
+			/* is name=md5 */
+			if (ngx_strncmp(tmp.data, "md5", sizeof("md5") - 1) == 0 ) {
+				text = ngx_http_sticky_misc_text_md5;
+				continue;
+			}
+
+			/* is name=sha1 */
+			if (ngx_strncmp(tmp.data, "sha1", sizeof("sha1") - 1) == 0 ) {
+				text = ngx_http_sticky_misc_text_sha1;
+				continue;
+			}
+
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "wrong value for \"text=\": raw, md5 or sha1");
+			return NGX_CONF_ERROR;
+		}
+
 		/* is "hash=" is starting the argument ? */
 		if ((u_char *)ngx_strstr(value[i].data, "hash=") == value[i].data) {
 
 			/* only hash or hmac can be used, not both */
-			if (hmac) {
-				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "please choose between \"hash=\" and \"hmac=\"");
+			if (hmac || text) {
+				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "please choose between \"hash=\", \"hmac=\" and \"text=\"");
 				return NGX_CONF_ERROR;
 			}
 
@@ -507,6 +554,7 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 				hash = ngx_http_sticky_misc_sha1;
 				continue;
 			}
+
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "wrong value for \"hash=\": index, md5 or sha1");
 			return NGX_CONF_ERROR;
 		}
@@ -515,8 +563,8 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 		if ((u_char *)ngx_strstr(value[i].data, "hmac=") == value[i].data) {
 
 			/* only hash or hmac can be used, not both */
-			if (hash != NGX_CONF_UNSET_PTR) {
-				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "please choose between \"hash=\" and \"hmac=\"");
+			if (hash != NGX_CONF_UNSET_PTR || text) {
+				ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "please choose between \"hash=\", \"hmac=\" and \"text\"");
 				return NGX_CONF_ERROR;
 			}
 
@@ -570,8 +618,8 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 		return NGX_CONF_ERROR;
 	}
 
-	/* if has and hmac have not been set, default to md5 */
-	if (hash == NGX_CONF_UNSET_PTR && hmac == NULL) {
+	/* if has and hmac and name have not been set, default to md5 */
+	if (hash == NGX_CONF_UNSET_PTR && hmac == NULL && text == NULL) {
 		hash = ngx_http_sticky_misc_md5;
 	}
 
@@ -600,6 +648,7 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	sticky_conf->cookie_expires = expires;
 	sticky_conf->hash = hash;
 	sticky_conf->hmac = hmac;
+	sticky_conf->text = text;
 	sticky_conf->hmac_key = hmac_key;
 	sticky_conf->no_fallback = no_fallback;
 	sticky_conf->peers = NULL; /* ensure it's null before running */
