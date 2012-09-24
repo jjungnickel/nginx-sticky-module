@@ -671,7 +671,8 @@ static char *ngx_http_sticky_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	upstream_conf->flags = NGX_HTTP_UPSTREAM_CREATE
 		| NGX_HTTP_UPSTREAM_MAX_FAILS
 		| NGX_HTTP_UPSTREAM_FAIL_TIMEOUT
-		| NGX_HTTP_UPSTREAM_DOWN;
+		| NGX_HTTP_UPSTREAM_DOWN
+    | NGX_HTTP_UPSTREAM_WEIGHT;
 
 	return NGX_CONF_OK;
 }
