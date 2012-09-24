@@ -85,6 +85,11 @@ Usage
 Detail Mechanism
 	see docs/sticky.{vsd,pdf}	
 
+Warnings:
+  - sticky module does not work with the "backup" option of the "server" configuration item.
+  - sticky module does not work with the nginx_http_upstream_check_module.
+  - sticky module may require to configure nginx with SSL support.
+
 Contributing
 	http://code.google.com/p/nginx-sticky-module/
 
